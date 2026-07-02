@@ -1,89 +1,65 @@
+"""Train and evaluate diabetes risk models on the Pima Indians dataset.
+
+Two kinds of evaluation are reported:
+  1. Stratified 5-fold cross-validation  -> a trustworthy performance estimate.
+  2. A single held-out test split        -> a detailed per-class report and
+                                             confusion matrix.
+The deployed model (Logistic Regression) and its scaler are saved separately
+so the Streamlit app can load them independently.
+"""
+
+import joblib
 import pandas as pd
-
-df = pd.read_csv("data/diabetes.csv")
-
-print("Dataset shape:", df.shape)
-
-print("\nFirst 5 rows:")
-print(df.head())
-
-print("\nColumns:")
-print(df.columns)
-print("Dataset shape:", df.shape)
-print(df.describe())
-cols = [
-    "Glucose",
-    "BloodPressure",
-    "SkinThickness",
-    "Insulin",
-    "BMI"
-]
-
-for col in cols:
-    print(col, (df[col] == 0).sum())
-print(df["Outcome"].value_counts())
-cols = [
-    "Glucose",
-    "BloodPressure",
-    "SkinThickness",
-    "Insulin",
-    "BMI"
-]
-
-for col in cols:
-    df[col] = df[col].replace(0, df[col].median())
-for col in cols:
-    print(col, (df[col] == 0).sum())
-X = df.drop("Outcome", axis=1)
-y = df["Outcome"]
-
-print("Features shape:", X.shape)
-print("Target shape:", y.shape)
-from sklearn.model_selection import train_test_split
-
-X_train, X_test, y_train, y_test = train_test_split(
-    X,
-    y,
-    test_size=0.2,
-    random_state=42
-)
-
-print("Training samples:", X_train.shape)
-print("Testing samples:", X_test.shape)
-print(df.describe())
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score
+from sklearn.model_selection import StratifiedKFold, cross_val_score, train_test_split
+from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
-scaler = StandardScaler()
+DATA_PATH = "data/diabetes.csv"
+# Columns where a value of 0 is biologically impossible -> treat 0 as missing.
+ZERO_AS_MISSING = ["Glucose", "BloodPressure", "SkinThickness", "Insulin", "BMI"]
+RANDOM_STATE = 42
 
-X_train = scaler.fit_transform(X_train)
-X_test = scaler.transform(X_test)
 
-print(X_train[:3])
-from sklearn.linear_model import LogisticRegression
+def load_data(path=DATA_PATH):
+    """Load the CSV and replace impossible zeros with each column's median."""
+    df = pd.read_csv(path)
+    for col in ZERO_AS_MISSING:
+        df[col] = df[col].replace(0, df[col].median())
+    X = df.drop("Outcome", axis=1)
+    y = df["Outcome"]
+    return X, y
 
-model = LogisticRegression()
 
-model.fit(X_train, y_train)
-predictions = model.predict(X_test)
+def cross_validate(name, estimator, X, y):
+    """Stratified 5-fold cross-validation.
 
-print(predictions[:10])
-from sklearn.metrics import accuracy_score
+    The scaler lives inside the pipeline, so it is re-fit on each fold's
+    training rows only -> no data leakage into the test fold.
+    """
+    pipe = Pipeline([
+        ("scaler", StandardScaler()),
+        ("model", estimator),
+    ])
+    cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=RANDOM_STATE)
+    scores = cross_val_score(pipe, X, y, cv=cv, scoring="roc_auc")
+    print(f"\n[{name}] fold AUCs: {scores.round(3)}")
+    print(f"[{name}] mean AUC: {scores.mean():.3f} +/- {scores.std():.3f}")
+    return scores
 
-accuracy = accuracy_score(y_test, predictions)
 
-print("Accuracy:", accuracy)
-from sklearn.metrics import classification_report
+def evaluate_on_holdout(name, estimator, X_train, X_test, y_train, y_test):
+    """Fit on the training split and print a full report on the test split."""
+    estimator.fit(X_train, y_train)
+    preds = estimator.predict(X_test)
+    proba = estimator.predict_proba(X_test)[:, 1]
 
-print(classification_report(y_test, predictions))
-from sklearn.ensemble import RandomForestClassifier
+    print(f"\n===== {name}: held-out test set =====")
+    print(classification_report(y_test, preds, digits=3))
 
-rf = RandomForestClassifier(
-    n_estimators=100,
-    random_state=42
-)
-
-rf.fit(X_train, y_train)
-
-rf_pred = rf.predict(X_test)
-
-print("RF Accuracy:", accuracy_score(y_test, rf_pred))
+    tn, fp, fn, tp = confusion_matrix(y_test, preds).ravel()
+    print("Confusion matrix:")
+    print(f"  True Negatives : {tn:3d}    False Positives: {fp:3d}")
+    print(f"  False Negatives: {fn:3d}    True Positives : {tp:3d}
